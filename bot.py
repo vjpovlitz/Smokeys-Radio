@@ -43,6 +43,17 @@ file_handler.setFormatter(file_format)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
+# Enable debug logging for discord voice to diagnose connection issues
+discord_logger = logging.getLogger('discord.voice_state')
+discord_logger.setLevel(logging.DEBUG)
+discord_logger.addHandler(console_handler)
+discord_logger.addHandler(file_handler)
+
+discord_gw_logger = logging.getLogger('discord.gateway')
+discord_gw_logger.setLevel(logging.DEBUG)
+discord_gw_logger.addHandler(console_handler)
+discord_gw_logger.addHandler(file_handler)
+
 # Environment variables for tokens
 logger.info("Starting Smokey's Radio...")
 load_dotenv()
@@ -214,6 +225,7 @@ def get_ytdlp_options(method="standard"):
 # Setup of intents for Discord API
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 
 # Bot setup
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -222,7 +234,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     logger.info(f"{bot.user} is now ready!")
-    print(f"🎵 Smokey's Radio is online! 🎵")
+    print(f"Smokey's Radio is online!")
     print(f"Logged in as: {bot.user}")
     print("------")
     
@@ -246,11 +258,16 @@ async def on_ready():
         f.write(invite_link)
     print(f"Invite link saved to bot_invite.txt")
     
-    # Will sync commands on startup
+    # Will sync commands on startup (global + per-guild for immediate effect)
     try:
         synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
-        print(f"✅ Synced {len(synced)} slash commands")
+        logger.info(f"Synced {len(synced)} command(s) globally")
+        print(f"Synced {len(synced)} slash commands globally")
+        for guild in bot.guilds:
+            bot.tree.copy_global_to(guild=guild)
+            guild_synced = await bot.tree.sync(guild=guild)
+            logger.info(f"Synced {len(guild_synced)} command(s) to guild: {guild.name}")
+            print(f"Synced {len(guild_synced)} commands to {guild.name}")
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}")
 
@@ -434,8 +451,41 @@ async def stats(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
+async def song_query_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    if len(current) < 2:
+        return []
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "default_search": "ytsearch5",
+            "noplaylist": True,
+        }
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, lambda: _autocomplete_search(current, ydl_opts))
+        return results[:25]  # Discord allows max 25 choices
+    except Exception:
+        return []
+
+def _autocomplete_search(query, ydl_opts):
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch5:{query}", download=False)
+            if not info or "entries" not in info:
+                return []
+            choices = []
+            for entry in info["entries"]:
+                if entry and entry.get("title"):
+                    title = entry["title"][:100]  # Discord choice max length
+                    choices.append(app_commands.Choice(name=title, value=title))
+            return choices
+    except Exception:
+        return []
+
 @bot.tree.command(name="play", description="Play a song or add it to the queue.")
 @app_commands.describe(song_query="Search query or YouTube URL")
+@app_commands.autocomplete(song_query=song_query_autocomplete)
 async def play(interaction: discord.Interaction, song_query: str):
     await interaction.response.defer()
     logger.info(f"Play command received: {song_query} from {interaction.user}")
@@ -452,18 +502,37 @@ async def play(interaction: discord.Interaction, song_query: str):
     # Get or create voice client
     voice_client = interaction.guild.voice_client
     if voice_client is None:
-        try:
-            logger.info(f"Attempting to connect to voice channel: {voice_channel.name}")
-            voice_client = await voice_channel.connect(timeout=10.0, reconnect=True)
-            logger.info(f"Connected to voice channel: {voice_channel.name}")
-        except asyncio.TimeoutError:
-            logger.error("Connection to voice channel timed out")
-            await interaction.followup.send("❌ Connection timed out. Try again or use a different voice channel.")
-            return
-        except Exception as e:
-            logger.error(f"Failed to connect to voice channel: {str(e)}", exc_info=True)
-            await interaction.followup.send(f"❌ Failed to connect to voice channel: {str(e)}")
-            return
+        for attempt in range(2):
+            try:
+                logger.info(f"Attempting to connect to voice channel: {voice_channel.name} (attempt {attempt + 1})")
+                voice_client = await voice_channel.connect(timeout=60.0, reconnect=True, self_deaf=True)
+                # Wait briefly for the connection to fully establish
+                await asyncio.sleep(1)
+                if not voice_client.is_connected():
+                    logger.warning("Voice client connected but is_connected() returned False, retrying...")
+                    try:
+                        await voice_client.disconnect(force=True)
+                    except Exception:
+                        pass
+                    continue
+                logger.info(f"Connected to voice channel: {voice_channel.name}")
+                break
+            except asyncio.TimeoutError:
+                logger.error(f"Connection to voice channel timed out (attempt {attempt + 1})")
+                if attempt == 0:
+                    # Clean up any partial connection before retrying
+                    if interaction.guild.voice_client:
+                        try:
+                            await interaction.guild.voice_client.disconnect(force=True)
+                        except Exception:
+                            pass
+                    continue
+                await interaction.followup.send("❌ Connection timed out. Try again or use a different voice channel.")
+                return
+            except Exception as e:
+                logger.error(f"Failed to connect to voice channel: {str(e)}", exc_info=True)
+                await interaction.followup.send(f"❌ Failed to connect to voice channel: {str(e)}")
+                return
     elif voice_channel != voice_client.channel:
         logger.info(f"Moving from {voice_client.channel.name} to {voice_channel.name}")
         await voice_client.move_to(voice_channel)
@@ -607,18 +676,79 @@ async def play(interaction: discord.Interaction, song_query: str):
 async def play_next_song(voice_client, guild_id, channel):
     if guild_id in SONG_QUEUES and SONG_QUEUES[guild_id]:
         audio_url, title, thumbnail, duration = SONG_QUEUES[guild_id][0]
-        
+
         ffmpeg_options = {
             "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
             "options": "-vn -af 'volume=0.5' -c:a libopus -b:a 128k",
         }
-        
+
         try:
+            # Verify voice connection is still alive, reconnect if needed
+            guild = bot.get_guild(int(guild_id))
+            if guild is None:
+                logger.error(f"Could not find guild {guild_id}")
+                return
+
+            # Re-fetch voice_client from guild in case the reference is stale
+            voice_client = guild.voice_client
+
+            if voice_client is None or not voice_client.is_connected():
+                logger.warning("Voice client disconnected before playback, attempting to reconnect...")
+                # Try to find the channel to reconnect to
+                if voice_client and voice_client.channel:
+                    target_channel = voice_client.channel
+                else:
+                    # Fall back to checking members in voice channels
+                    target_channel = None
+                    for vc in guild.voice_channels:
+                        if guild.me in vc.members:
+                            target_channel = vc
+                            break
+
+                if target_channel:
+                    try:
+                        # Clean up old connection
+                        if voice_client:
+                            try:
+                                await voice_client.disconnect(force=True)
+                            except Exception:
+                                pass
+                        voice_client = await target_channel.connect(timeout=60.0, reconnect=True, self_deaf=True)
+                        await asyncio.sleep(1)
+                        logger.info(f"Reconnected to voice channel: {target_channel.name}")
+                    except Exception as e:
+                        logger.error(f"Failed to reconnect to voice: {e}")
+                        await channel.send(f"❌ Lost voice connection and couldn't reconnect: {e}")
+                        SONG_QUEUES[guild_id].clear()
+                        return
+                else:
+                    logger.error("No voice channel to reconnect to")
+                    await channel.send("❌ Lost voice connection.")
+                    SONG_QUEUES[guild_id].clear()
+                    return
+
             logger.info(f"Playing: {title}")
             
-            # Check if ffmpeg.exe exists in bin directory, otherwise use system ffmpeg
-            ffmpeg_path = "bin\\ffmpeg\\ffmpeg.exe"
-            if os.path.exists(ffmpeg_path):
+            # Check common ffmpeg locations, otherwise use system ffmpeg
+            ffmpeg_path = None
+            for path in [
+                "bin\\ffmpeg\\ffmpeg.exe",
+            ]:
+                if os.path.exists(path):
+                    ffmpeg_path = path
+                    break
+
+            # Search winget install location if not found
+            if not ffmpeg_path:
+                import glob
+                winget_pattern = os.path.expandvars(
+                    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\ffmpeg-*\bin\ffmpeg.exe"
+                )
+                matches = glob.glob(winget_pattern)
+                if matches:
+                    ffmpeg_path = matches[0]
+
+            if ffmpeg_path:
                 source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options, executable=ffmpeg_path)
             else:
                 source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options)
@@ -680,9 +810,11 @@ async def play_next_song(voice_client, guild_id, channel):
     else:
         # Empty queue, disconnect after a delay
         await asyncio.sleep(300)  # 5 minutes
-        if voice_client.is_connected() and not voice_client.is_playing():
+        guild = bot.get_guild(int(guild_id))
+        vc = guild.voice_client if guild else None
+        if vc and vc.is_connected() and not vc.is_playing():
             logger.info("Disconnecting due to inactivity")
-            await voice_client.disconnect()
+            await vc.disconnect()
 
 @bot.tree.command(name="test", description="Test if the bot is responding to commands")
 async def test(interaction: discord.Interaction):

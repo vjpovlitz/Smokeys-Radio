@@ -1,0 +1,12 @@
+logs/
+bin/
+scripts/
+__pycache__/
+*.pyc
+.env
+.env.example
+bot_invite.txt
+*.md
+LICENSE
+.git
+.gitignore

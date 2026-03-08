@@ -1,130 +1,159 @@
-# 🎵 Smokey's Radio - Advanced Discord Music Bot
+# Smokey's Radio - Discord Music Bot
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
-![Python](https://img.shields.io/badge/python-3.8+-green)
-![Discord.py](https://img.shields.io/badge/discord.py-2.0+-blue)
+A Discord music bot built with Python that plays music from YouTube using yt-dlp with multiple extraction bypass methods. Uses discord.py 2.0+ slash commands with autocomplete search.
 
-Smokey's Radio is an advanced Discord music bot that uses multiple extraction methods to play music from YouTube and other sources, even when the content has restrictions. The bot provides high-quality audio playback, reliable connections, and a variety of commands for controlling your music experience.
+## Features
 
-## ✨ Features
+- Play music from YouTube search or direct URLs with autocomplete suggestions
+- Five-tier extraction bypass system (standard, mobile, embed, music, alternative)
+- Queue management with embedded displays
+- Bypass statistics tracking
+- Auto-disconnect after 5 minutes of inactivity
+- Rotating log files
 
-- 🎧 Play music from YouTube search queries or direct URLs
-- 🔄 Multiple extraction methods that bypass common restrictions
-- 📊 Statistics tracking for bypass success rates
-- 🎮 Easy-to-use slash commands
-- 📋 Queue management with visual display
-- 🏃‍♂️ Reliable streaming with automatic reconnection
-- 📝 Detailed logging for troubleshooting
+## Project Structure
 
-## 🔧 Installation
+```
+smokeys-radio/
+  bot.py              # Main bot (single-file)
+  requirements.txt    # Python dependencies
+  Dockerfile          # Container build
+  docker-compose.yml  # Container orchestration
+  .env                # Discord token (not committed)
+  scripts/
+    setup_audio.py    # Dependency installer (Windows)
+    api_register.py   # Manual slash command registration
+    start.bat         # Windows launcher
+  logs/               # Rotating log files (not committed)
+```
 
-### Prerequisites
-- Python 3.8 or higher
-- FFmpeg installed on your system or in the bot's directory
-- A Discord bot token ([Create a bot here](https://discord.com/developers/applications))
+## Prerequisites
 
-### Setup
+- Python 3.10+ (for local) or Docker
+- FFmpeg
+- A Discord bot token — [create one here](https://discord.com/developers/applications)
 
-1. **Clone the repository**
-   ```
+### Creating a Discord Bot
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click **New Application**, give it a name
+3. Go to **Bot** > click **Reset Token** > copy the token
+4. Under **Privileged Gateway Intents**, enable **Message Content Intent**
+5. Save changes
+
+## Setup
+
+### Option 1: Docker (recommended for servers)
+
+```bash
+git clone https://github.com/yourusername/smokeys-radio.git
+cd smokeys-radio
+
+# Configure your token
+cp .env.example .env
+# Edit .env and add your DISCORD_TOKEN
+
+# Build and run
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+The Docker image includes FFmpeg and all dependencies. Logs are mounted to `./logs/` on the host.
+
+### Option 2: Local (Windows)
+
+1. Clone the repo and install dependencies:
+   ```bash
    git clone https://github.com/yourusername/smokeys-radio.git
    cd smokeys-radio
-   ```
-
-2. **Install dependencies**
-   ```
-   python setup_audio.py
-   ```
-   Or manually install with:
-   ```
    pip install -r requirements.txt
    ```
+   Or use the automated setup (also downloads FFmpeg):
+   ```bash
+   python scripts/setup_audio.py
+   ```
 
-3. **Create a `.env` file with your Discord token**
-   ```
-   DISCORD_TOKEN=your_discord_bot_token_here
+2. Configure your token:
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your DISCORD_TOKEN
    ```
 
-4. **Run the bot**
-   ```
+3. Run the bot:
+   ```bash
    python bot.py
    ```
+   Or double-click `scripts/start.bat`.
 
-5. **Register commands with Discord API** (if needed)
-   ```
-   python api_register.py
-   ```
+4. Invite the bot using the link saved to `bot_invite.txt` after first run.
 
-6. **Invite the bot to your server**
-   - Use the link generated in `bot_invite.txt` after running the bot
+### Option 3: Local (Linux/macOS)
 
-## 🎮 Commands
+```bash
+git clone https://github.com/yourusername/smokeys-radio.git
+cd smokeys-radio
+
+# Install FFmpeg
+sudo apt install ffmpeg          # Debian/Ubuntu
+brew install ffmpeg              # macOS
+
+pip install -r requirements.txt
+cp .env.example .env
+# Edit .env and add your DISCORD_TOKEN
+
+python bot.py
+```
+
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/play [song_query]` | Play a song or add it to the queue |
-| `/skip` | Skip to the next song in the queue |
-| `/pause` | Pause the currently playing song |
-| `/resume` | Resume a paused song |
-| `/stop` | Stop playback and clear the queue |
-| `/queue` | Display the current song queue |
-| `/stats` | Show bypass statistics and success rates |
-| `/test` | Check if the bot is responding to commands |
-| `!sync` | Sync commands with Discord (admin only) |
-| `!resync` | Force a resync of commands (admin only) |
+| `/play <query>` | Play a song or add it to the queue (supports autocomplete) |
+| `/skip` | Skip the current song |
+| `/pause` | Pause playback |
+| `/resume` | Resume playback |
+| `/stop` | Stop playback, clear queue, and disconnect |
+| `/queue` | Show the current queue |
+| `/stats` | Show extraction bypass statistics |
+| `/test` | Check if the bot is responding |
+| `!sync` | Manually sync slash commands |
+| `!resync` | Clear and re-register slash commands |
 
-## 🔍 Extraction Methods
+## Extraction System
 
-Smokey's Radio uses multiple extraction methods to bypass restrictions:
+The bot tries five extraction methods in order until one works:
 
-- **Standard**: Default yt-dlp extraction
-- **Mobile**: Mimics a mobile device to access restricted content
-- **Embed**: Uses embedded player parameters
-- **Music**: Attempts to extract through YouTube Music
-- **Alternative**: Falls back to alternative sources when available
+1. **Standard** — default yt-dlp with geo-bypass
+2. **Mobile** — Android/iOS player clients
+3. **Embed** — embedded player parameters
+4. **Music** — YouTube Music player client
+5. **Alternative** — US geo-bypass with Google referer
 
-## 🛠️ Troubleshooting
+Use `/stats` to see success rates per method.
 
-### Commands Not Appearing
-1. Use `!sync` or `!resync` in your server
-2. Run `python api_register.py` to register commands directly with Discord
-3. Reinvite the bot using the link in `bot_invite.txt`
-4. Wait 5-10 minutes for Discord to update
+## Troubleshooting
 
-### Audio Not Playing
-1. Make sure FFmpeg is installed correctly
-2. Run `python setup_audio.py` to install all audio dependencies
-3. Check the logs in the `logs` directory for specific errors
-4. Ensure the bot has proper permissions in your Discord server
+### Bot can't join voice channels
+- Ensure the bot has **Connect** and **Speak** permissions in the voice channel
+- Update dependencies: `pip install -U "discord.py[voice]"` — the `davey` package is required for Discord's voice encryption (Dave protocol)
+- Check `logs/smokeys_radio.log` for WebSocket close codes
 
-### Connection Issues
-1. Check your internet connection
-2. Try different voice channels
-3. Restart the bot
-4. Check if Discord's voice servers are experiencing issues
+### Slash commands not appearing
+1. Try `!sync` or `!resync` in your server
+2. Run `python scripts/api_register.py` to register commands via the API
+3. Re-invite the bot using the link in `bot_invite.txt`
+4. Wait up to 10 minutes for Discord to propagate
 
-## 📈 Advanced Usage
+### No audio playing
+- Verify FFmpeg is installed: `ffmpeg -version`
+- On Windows, run `python scripts/setup_audio.py` to install FFmpeg automatically
+- Check logs for extraction errors — yt-dlp may need updating: `pip install -U yt-dlp`
 
-### Self-Hosting
-- For 24/7 operation, consider using a service like PM2 or running on a VPS
-- Update regularly with `git pull` to get the latest bypass methods
+## License
 
-### Custom FFmpeg Path
-If you have FFmpeg installed in a non-standard location, modify the path in `bot.py`:
-```python
-ffmpeg_path = "path/to/your/ffmpeg"
-```
-
-## 📝 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 🙏 Acknowledgements
-
-- [discord.py](https://github.com/Rapptz/discord.py) - The Discord API wrapper
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - YouTube downloader with bypass capabilities
-- All contributors who have helped with testing and development 
+MIT License — see [LICENSE](LICENSE) for details.
