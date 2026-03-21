@@ -303,6 +303,56 @@ async def try_extraction_methods(query):
     # If all methods fail
     raise Exception("All extraction methods failed")
 
+class MusicControlView(discord.ui.View):
+    """Interactive buttons for music playback control."""
+
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Pause", emoji="⏸️", style=discord.ButtonStyle.secondary)
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if voice_client is None:
+            return await interaction.response.send_message("❌ I'm not in a voice channel.", ephemeral=True)
+
+        if voice_client.is_playing():
+            voice_client.pause()
+            button.label = "Resume"
+            button.emoji = "▶️"
+            button.style = discord.ButtonStyle.success
+            await interaction.response.edit_message(view=self)
+        elif voice_client.is_paused():
+            voice_client.resume()
+            button.label = "Pause"
+            button.emoji = "⏸️"
+            button.style = discord.ButtonStyle.secondary
+            await interaction.response.edit_message(view=self)
+        else:
+            await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
+
+    @discord.ui.button(label="Skip", emoji="⏭️", style=discord.ButtonStyle.primary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+            await interaction.response.send_message("⏭️ Skipped!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Nothing to skip.", ephemeral=True)
+
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if voice_client:
+            guild_id = str(interaction.guild_id)
+            if guild_id in SONG_QUEUES:
+                SONG_QUEUES[guild_id].clear()
+            voice_client.stop()
+            await voice_client.disconnect()
+            await interaction.response.send_message("⏹️ Stopped and disconnected.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ I'm not in a voice channel.", ephemeral=True)
+
 @bot.tree.command(name="skip", description="Skips the current playing song")
 async def skip(interaction: discord.Interaction):
     if interaction.guild.voice_client and (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
@@ -665,7 +715,7 @@ async def play(interaction: discord.Interaction, song_query: str):
             # Add helpful tip
             embed.set_footer(text="Tip: Use /queue to see the full playlist")
             
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, view=MusicControlView(guild_id))
             logger.info("Now playing notification sent")
             await play_next_song(voice_client, guild_id, interaction.channel)
     
@@ -797,8 +847,8 @@ async def play_next_song(voice_client, guild_id, channel):
             # Add helpful tip
             embed.set_footer(text="Tip: Use /queue to see the full playlist")
             
-            await channel.send(embed=embed)
-            
+            await channel.send(embed=embed, view=MusicControlView(guild_id))
+
         except Exception as e:
             logger.error(f"Error starting playback: {str(e)}")
             await channel.send(f"❌ Error playing {title}: {str(e)}")
