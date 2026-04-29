@@ -23,10 +23,19 @@ build/
 
 # Bot-specific files
 bot_invite.txt
-bin/ffmpeg/ffmpeg.exe
+bin/
 cookies/
 .cookies/
 youtube_cookies.txt
+
+# Local databases / dumps
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+
+# Claude Code project state
+.claude/
 
 # IDEs and editors
 .idea/
@@ -36,4 +45,4 @@ youtube_cookies.txt
 
 # OS specific files
 .DS_Store
-Thumbs.db 
+Thumbs.db

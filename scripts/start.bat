@@ -1,7 +1,7 @@
 @echo off
 title Smokey's Radio
 
-rem Project directory — edit this path if you move the repo
+rem Project directory - edit this path if you move the repo
 set "PROJECT_DIR=C:\Users\vjpov\Codebase\Smokeys-Radio"
 
 if not exist "%PROJECT_DIR%\bot.py" (

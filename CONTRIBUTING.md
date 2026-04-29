@@ -42,10 +42,10 @@ We welcome feature suggestions! Please provide:
 2. Install dependencies:
    ```
    pip install -r requirements.txt
-   python setup_audio.py
+   python scripts/setup_audio.py
    ```
-3. Create a `.env` file with your test bot token
-4. Run tests before submitting changes
+3. Create a `.env` file with your test bot token (see `.env.example`)
+4. (Optional) Apply `scripts/schema.sql` to your SQL Server if you want to test stats features
 
 ## Style Guidelines
 

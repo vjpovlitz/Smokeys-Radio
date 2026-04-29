@@ -17,6 +17,8 @@ import json
 import time
 import sys
 
+import db
+
 # Set up logging
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
@@ -237,6 +239,10 @@ async def on_ready():
     print(f"Smokey's Radio is online!")
     print(f"Logged in as: {bot.user}")
     print("------")
+
+    # Probe database (fail-soft: stats logging disables itself on connection failure)
+    db.init()
+    print(f"Database: {'connected' if db.is_enabled() else 'disabled'}")
     
     # Generate and save invite link with proper scopes
     invite_link = discord.utils.oauth_url(
@@ -274,6 +280,24 @@ async def on_ready():
 @bot.event
 async def on_error(event, *args, **kwargs):
     logger.error(f"Discord event error in {event}: {str(sys.exc_info())}")
+
+async def _log_cmd(interaction, name, args=None, success=True, error=None):
+    """Best-effort logging of a slash command invocation. Never raises."""
+    try:
+        await db.log_command(
+            command_name=name,
+            user_id=interaction.user.id,
+            username=interaction.user.name,
+            display_name=getattr(interaction.user, "display_name", None),
+            guild_id=interaction.guild_id,
+            guild_name=(interaction.guild.name if interaction.guild else None),
+            success=success,
+            args=args,
+            error=error,
+        )
+    except Exception as e:
+        logger.warning(f"_log_cmd failed for {name}: {e}")
+
 
 @bot.command(name="sync")
 async def sync_commands(ctx):
@@ -358,103 +382,100 @@ async def skip(interaction: discord.Interaction):
     if interaction.guild.voice_client and (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
         interaction.guild.voice_client.stop()
         await interaction.response.send_message("⏭️ Skipped the current song.")
+        await _log_cmd(interaction, "skip", success=True)
     else:
         await interaction.response.send_message("❌ Not playing anything to skip.")
+        await _log_cmd(interaction, "skip", success=False, error="nothing playing")
 
 @bot.tree.command(name="pause", description="Pause the currently playing song.")
 async def pause(interaction: discord.Interaction):
     voice_client = interaction.guild.voice_client
 
-    # Check if the bot is in a voice channel
     if voice_client is None:
-        return await interaction.response.send_message("❌ I'm not in a voice channel.")
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        await _log_cmd(interaction, "pause", success=False, error="not in voice")
+        return
 
-    # Check if something is actually playing
     if not voice_client.is_playing():
-        return await interaction.response.send_message("❌ Nothing is currently playing.")
-    
-    # Pause the track
+        await interaction.response.send_message("❌ Nothing is currently playing.")
+        await _log_cmd(interaction, "pause", success=False, error="nothing playing")
+        return
+
     voice_client.pause()
     await interaction.response.send_message("⏸️ Playback paused!")
+    await _log_cmd(interaction, "pause", success=True)
 
 @bot.tree.command(name="resume", description="Resume the currently paused song.")
 async def resume(interaction: discord.Interaction):
     voice_client = interaction.guild.voice_client
 
-    # Check if the bot is in a voice channel
     if voice_client is None:
-        return await interaction.response.send_message("❌ I'm not in a voice channel.")
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        await _log_cmd(interaction, "resume", success=False, error="not in voice")
+        return
 
-    # Check if it's actually paused
     if not voice_client.is_paused():
-        return await interaction.response.send_message("❌ I'm not paused right now.")
-    
-    # Resume playback
+        await interaction.response.send_message("❌ I'm not paused right now.")
+        await _log_cmd(interaction, "resume", success=False, error="not paused")
+        return
+
     voice_client.resume()
     await interaction.response.send_message("▶️ Playback resumed!")
+    await _log_cmd(interaction, "resume", success=True)
 
 @bot.tree.command(name="stop", description="Stop playback and clear the queue.")
 async def stop(interaction: discord.Interaction):
     voice_client = interaction.guild.voice_client
 
-    # Check if the bot is in a voice channel
     if not voice_client or not voice_client.is_connected():
-        return await interaction.response.send_message("❌ I'm not connected to any voice channel.")
+        await interaction.response.send_message("❌ I'm not connected to any voice channel.")
+        await _log_cmd(interaction, "stop", success=False, error="not connected")
+        return
 
-    # Clear the guild's queue
     guild_id_str = str(interaction.guild_id)
     if guild_id_str in SONG_QUEUES:
         SONG_QUEUES[guild_id_str].clear()
 
-    # If something is playing or paused, stop it
     if voice_client.is_playing() or voice_client.is_paused():
         voice_client.stop()
 
-    # Disconnect from the channel
     await voice_client.disconnect()
 
     await interaction.response.send_message("⏹️ Stopped playback and disconnected!")
+    await _log_cmd(interaction, "stop", success=True)
 
 @bot.tree.command(name="queue", description="Show the current song queue")
 async def queue(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
-    
+
     if guild_id not in SONG_QUEUES or not SONG_QUEUES[guild_id]:
-        return await interaction.response.send_message("📭 The queue is empty.")
-    
-    # Create an embed for the queue
-    embed = discord.Embed(
-        title="🎵 Current Queue",
-        color=discord.Color.blue()
-    )
-    
-    # Add current song if playing
+        await interaction.response.send_message("📭 The queue is empty.")
+        await _log_cmd(interaction, "queue", success=True)
+        return
+
+    embed = discord.Embed(title="🎵 Current Queue", color=discord.Color.blue())
+
     voice_client = interaction.guild.voice_client
     if voice_client and voice_client.is_playing():
         embed.add_field(
             name="🎧 Now Playing",
             value=f"**{SONG_QUEUES[guild_id][0][1]}**",
-            inline=False
+            inline=False,
         )
-    
-    # Add upcoming songs
+
     queue_display = []
-    for i, (_, title) in enumerate(list(SONG_QUEUES[guild_id])[1:], 1):
-        if i <= 10:  # Show only 10 songs to avoid overflow
-            queue_display.append(f"{i}. **{title}**")
-    
+    for i, item in enumerate(list(SONG_QUEUES[guild_id])[1:], 1):
+        if i > 10:
+            break
+        queue_display.append(f"{i}. **{item[1]}**")
+
     if queue_display:
-        embed.add_field(
-            name="📋 Up Next",
-            value="\n".join(queue_display),
-            inline=False
-        )
-        
-        # Add note if queue is longer
+        embed.add_field(name="📋 Up Next", value="\n".join(queue_display), inline=False)
         if len(SONG_QUEUES[guild_id]) > 11:
             embed.set_footer(text=f"And {len(SONG_QUEUES[guild_id]) - 11} more songs...")
-    
+
     await interaction.response.send_message(embed=embed)
+    await _log_cmd(interaction, "queue", success=True)
 
 @bot.tree.command(name="stats", description="Show bypass statistics and success rates")
 async def stats(interaction: discord.Interaction):
@@ -498,8 +519,23 @@ async def stats(interaction: discord.Interaction):
     
     # Add totals
     embed.set_footer(text=f"Unique successful videos: {len(BYPASS_STATS['successful_videos'])} | Unique failed videos: {len(BYPASS_STATS['failed_videos'])}")
-    
+
+    # Persistent totals from the database
+    db_totals = await db.totals()
+    if db_totals:
+        embed.add_field(
+            name="📚 All-Time (DB)",
+            value=(
+                f"Plays: {db_totals.get('total_plays', 0)} | "
+                f"Songs: {db_totals.get('unique_songs', 0)} | "
+                f"Users: {db_totals.get('unique_users', 0)} | "
+                f"Commands: {db_totals.get('total_commands', 0)}"
+            ),
+            inline=False,
+        )
+
     await interaction.response.send_message(embed=embed)
+    await _log_cmd(interaction, "stats", success=True)
 
 async def song_query_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     if len(current) < 2:
@@ -539,11 +575,11 @@ def _autocomplete_search(query, ydl_opts):
 async def play(interaction: discord.Interaction, song_query: str):
     await interaction.response.defer()
     logger.info(f"Play command received: {song_query} from {interaction.user}")
-    
-    # Check if user is in a voice channel
+
     if not interaction.user.voice:
         logger.warning(f"User {interaction.user} not in a voice channel")
         await interaction.followup.send("❌ You must be in a voice channel.")
+        await _log_cmd(interaction, "play", args=song_query, success=False, error="user not in voice")
         return
 
     voice_channel = interaction.user.voice.channel
@@ -601,43 +637,49 @@ async def play(interaction: discord.Interaction, song_query: str):
         
         # Try extraction with all methods if needed
         logger.info("Starting extraction with all methods")
+        successful_method = None
         for method in ["standard", "mobile", "embed", "music", "alternative"]:
             try:
                 logger.info(f"Trying method: {method}")
                 ydl_options = get_ytdlp_options(method)
                 results = await search_ytdlp_async(query, ydl_options)
                 logger.info(f"Method {method} succeeded!")
+                successful_method = method
                 break
             except Exception as e:
                 logger.warning(f"Method {method} failed: {str(e)}")
                 results = None
                 continue
-        
+
         if not results:
             logger.error("All extraction methods failed")
             await interaction.followup.send("❌ Could not extract video information after trying all methods.")
+            await _log_cmd(interaction, "play", args=song_query, success=False, error="all extraction methods failed")
             return
-        
-        # Process the results
+
         if "entries" in results:
-            # Search result
             tracks = results.get("entries", [])
             if not tracks:
                 logger.warning("No tracks found in search results")
                 await interaction.followup.send("❌ No results found.")
+                await _log_cmd(interaction, "play", args=song_query, success=False, error="no results")
                 return
             track = tracks[0]
             logger.info(f"Selected track from search: {track.get('title', 'Unknown')}")
         else:
-            # Direct URL result
             track = results
             logger.info(f"Using direct URL result: {track.get('title', 'Unknown')}")
-        
+
         audio_url = track["url"]
         title = track.get("title", "Untitled")
         thumbnail = track.get("thumbnail") if isinstance(track.get("thumbnail"), str) else None
         duration = track.get("duration") or 0
         duration_str = time.strftime("%M:%S", time.gmtime(duration))
+        youtube_id = track.get("id") or ""
+        uploader = track.get("uploader") or track.get("channel")
+        play_source = "url" if ("youtube.com/" in song_query or "youtu.be/" in song_query) else "search"
+        # Only meaningful when the user typed a search; for raw URLs we leave it NULL
+        search_query_for_db = song_query if play_source == "search" else None
         
         logger.info(f"Audio URL: {audio_url[:50]}... (truncated)")
         logger.info(f"Title: {title}")
@@ -648,7 +690,14 @@ async def play(interaction: discord.Interaction, song_query: str):
         if guild_id not in SONG_QUEUES:
             SONG_QUEUES[guild_id] = deque()
         
-        SONG_QUEUES[guild_id].append((audio_url, title, thumbnail, duration_str))
+        SONG_QUEUES[guild_id].append((
+            audio_url, title, thumbnail, duration_str,
+            youtube_id, int(duration), play_source, successful_method,
+            interaction.user.id, interaction.user.name,
+            getattr(interaction.user, "display_name", None),
+            interaction.guild_id, (interaction.guild.name if interaction.guild else None),
+            uploader, search_query_for_db,
+        ))
         logger.info(f"Added to queue. Queue length: {len(SONG_QUEUES[guild_id])}")
         
         # Create a more stylish embedded response
@@ -682,6 +731,7 @@ async def play(interaction: discord.Interaction, song_query: str):
             
             await interaction.followup.send(embed=embed)
             logger.info("Song added to queue notification sent")
+            await _log_cmd(interaction, "play", args=song_query, success=True)
         else:
             # Now playing message
             embed = discord.Embed(
@@ -717,15 +767,30 @@ async def play(interaction: discord.Interaction, song_query: str):
             
             await interaction.followup.send(embed=embed, view=MusicControlView(guild_id))
             logger.info("Now playing notification sent")
+            await _log_cmd(interaction, "play", args=song_query, success=True)
             await play_next_song(voice_client, guild_id, interaction.channel)
-    
+
     except Exception as e:
         logger.error(f"Error processing play command: {str(e)}", exc_info=True)
         await interaction.followup.send(f"❌ Error: {str(e)}")
+        await _log_cmd(interaction, "play", args=song_query, success=False, error=str(e))
 
 async def play_next_song(voice_client, guild_id, channel):
     if guild_id in SONG_QUEUES and SONG_QUEUES[guild_id]:
-        audio_url, title, thumbnail, duration = SONG_QUEUES[guild_id][0]
+        item = SONG_QUEUES[guild_id][0]
+        audio_url, title, thumbnail, duration = item[0], item[1], item[2], item[3]
+        # Extra metadata may be absent for items queued by older code paths
+        youtube_id        = item[4]  if len(item) > 4  else None
+        duration_seconds  = item[5]  if len(item) > 5  else None
+        play_source       = item[6]  if len(item) > 6  else None
+        extraction_method = item[7]  if len(item) > 7  else None
+        requester_id      = item[8]  if len(item) > 8  else None
+        requester_name    = item[9]  if len(item) > 9  else None
+        requester_display = item[10] if len(item) > 10 else None
+        requester_guild   = item[11] if len(item) > 11 else None
+        requester_guild_n = item[12] if len(item) > 12 else None
+        uploader          = item[13] if len(item) > 13 else None
+        search_query      = item[14] if len(item) > 14 else None
 
         ffmpeg_options = {
             "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -802,17 +867,53 @@ async def play_next_song(voice_client, guild_id, channel):
                 source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options, executable=ffmpeg_path)
             else:
                 source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options)
-            
+
+            # Insert the play row first so we have a play_id for the after_play closure.
+            # Awaiting (vs create_task) adds <50ms on local SQL Server and lets us close the loop on outcome.
+            play_id = None
+            if youtube_id and requester_id and requester_guild:
+                play_id = await db.log_play(
+                    youtube_id=youtube_id,
+                    title=title,
+                    duration_seconds=duration_seconds,
+                    thumbnail_url=thumbnail,
+                    user_id=requester_id,
+                    username=requester_name or "unknown",
+                    display_name=requester_display,
+                    guild_id=requester_guild,
+                    guild_name=requester_guild_n,
+                    source=play_source,
+                    extraction_method=extraction_method,
+                    uploader=uploader,
+                    search_query=search_query,
+                )
+
+            playback_started_at = time.time()
+
             def after_play(error):
                 if error:
                     logger.error(f"Error playing {title}: {error}")
-                
-                # Remove the song we just played
+
+                # Compute outcome from elapsed time vs known duration
+                elapsed = max(0, time.time() - playback_started_at)
+                if error:
+                    outcome = "error"
+                elif duration_seconds and duration_seconds > 0 and elapsed >= duration_seconds * 0.95:
+                    outcome = "completed"
+                else:
+                    outcome = "skipped"
+
+                if play_id is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        db.update_play_outcome(play_id, outcome, int(elapsed)),
+                        bot.loop,
+                    )
+
                 if guild_id in SONG_QUEUES and SONG_QUEUES[guild_id]:
                     SONG_QUEUES[guild_id].popleft()
-                
+
                 asyncio.run_coroutine_threadsafe(play_next_song(voice_client, guild_id, channel), bot.loop)
-            
+
             voice_client.play(source, after=after_play)
             
             # Create embedded now playing message
@@ -870,6 +971,125 @@ async def play_next_song(voice_client, guild_id, channel):
 async def test(interaction: discord.Interaction):
     logger.info(f"Test command received from {interaction.user}")
     await interaction.response.send_message("✅ Bot is working! Commands are registered correctly.")
+    await _log_cmd(interaction, "test", success=True)
+
+
+_PERIOD_CHOICES = [
+    app_commands.Choice(name="All-time", value="all"),
+    app_commands.Choice(name="Today", value="day"),
+    app_commands.Choice(name="This week", value="week"),
+    app_commands.Choice(name="This month", value="month"),
+]
+
+
+def _yt_link(youtube_id: str) -> str:
+    return f"https://youtu.be/{youtube_id}"
+
+
+@bot.tree.command(name="topsongs", description="Show the most-played songs")
+@app_commands.describe(period="Time window", scope="This server only or across all servers")
+@app_commands.choices(
+    period=_PERIOD_CHOICES,
+    scope=[
+        app_commands.Choice(name="This server", value="guild"),
+        app_commands.Choice(name="Global", value="global"),
+    ],
+)
+async def topsongs(
+    interaction: discord.Interaction,
+    period: app_commands.Choice[str] = None,
+    scope: app_commands.Choice[str] = None,
+):
+    period_v = period.value if period else "all"
+    scope_v = scope.value if scope else "guild"
+    guild_id = interaction.guild_id if scope_v == "guild" else None
+
+    if not db.is_enabled():
+        await interaction.response.send_message("❌ Database is unavailable; stats are off.", ephemeral=True)
+        await _log_cmd(interaction, "topsongs", args=f"{period_v}/{scope_v}", success=False, error="db disabled")
+        return
+
+    rows = await db.top_songs(period=period_v, limit=10, guild_id=guild_id)
+    if not rows:
+        await interaction.response.send_message("📭 No plays recorded yet for that window.")
+        await _log_cmd(interaction, "topsongs", args=f"{period_v}/{scope_v}", success=True)
+        return
+
+    lines = [f"`{i+1:>2}.` **{title}** - {plays} play{'s' if plays != 1 else ''}  ([link]({_yt_link(yid)}))"
+             for i, (title, yid, plays) in enumerate(rows)]
+    embed = discord.Embed(
+        title=f"🏆 Top Songs - {period_v}",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Scope: {'this server' if guild_id else 'global'}")
+    await interaction.response.send_message(embed=embed)
+    await _log_cmd(interaction, "topsongs", args=f"{period_v}/{scope_v}", success=True)
+
+
+@bot.tree.command(name="topusers", description="Show the users who play the most music")
+@app_commands.describe(period="Time window", scope="This server only or across all servers")
+@app_commands.choices(
+    period=_PERIOD_CHOICES,
+    scope=[
+        app_commands.Choice(name="This server", value="guild"),
+        app_commands.Choice(name="Global", value="global"),
+    ],
+)
+async def topusers(
+    interaction: discord.Interaction,
+    period: app_commands.Choice[str] = None,
+    scope: app_commands.Choice[str] = None,
+):
+    period_v = period.value if period else "all"
+    scope_v = scope.value if scope else "guild"
+    guild_id = interaction.guild_id if scope_v == "guild" else None
+
+    if not db.is_enabled():
+        await interaction.response.send_message("❌ Database is unavailable; stats are off.", ephemeral=True)
+        await _log_cmd(interaction, "topusers", args=f"{period_v}/{scope_v}", success=False, error="db disabled")
+        return
+
+    rows = await db.top_users(period=period_v, limit=10, guild_id=guild_id)
+    if not rows:
+        await interaction.response.send_message("📭 No plays recorded yet for that window.")
+        await _log_cmd(interaction, "topusers", args=f"{period_v}/{scope_v}", success=True)
+        return
+
+    lines = [f"`{i+1:>2}.` **{name}** - {plays} play{'s' if plays != 1 else ''}"
+             for i, (_uid, name, plays) in enumerate(rows)]
+    embed = discord.Embed(
+        title=f"👥 Top Listeners - {period_v}",
+        description="\n".join(lines),
+        color=discord.Color.purple(),
+    )
+    embed.set_footer(text=f"Scope: {'this server' if guild_id else 'global'}")
+    await interaction.response.send_message(embed=embed)
+    await _log_cmd(interaction, "topusers", args=f"{period_v}/{scope_v}", success=True)
+
+
+@bot.tree.command(name="myhistory", description="Show your recent plays")
+async def myhistory(interaction: discord.Interaction):
+    if not db.is_enabled():
+        await interaction.response.send_message("❌ Database is unavailable; stats are off.", ephemeral=True)
+        await _log_cmd(interaction, "myhistory", success=False, error="db disabled")
+        return
+
+    rows = await db.user_history(interaction.user.id, limit=10)
+    if not rows:
+        await interaction.response.send_message("📭 You haven't played anything yet.", ephemeral=True)
+        await _log_cmd(interaction, "myhistory", success=True)
+        return
+
+    lines = [f"`{i+1:>2}.` **{title}** - <t:{int(played_at.timestamp())}:R>  ([link]({_yt_link(yid)}))"
+             for i, (title, yid, played_at) in enumerate(rows)]
+    embed = discord.Embed(
+        title=f"🎼 Your Recent Plays",
+        description="\n".join(lines),
+        color=discord.Color.blue(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await _log_cmd(interaction, "myhistory", success=True)
 
 @bot.command()
 async def resync(ctx):
